@@ -82,7 +82,8 @@ const PROC_TERM: u32 = 0x0001;
 const PROC_VM_READ: u32 = 0x0010;
 const PROC_QUERY_INFO: u32 = 0x0400;
 const STATUS_SUCCESS: i32 = 0;
-const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC0000004 as i32;
+// Исправленная константа: 0xC0000004 в беззнаковом виде это 3221225476, в знаковом это -1073741820
+const STATUS_INFO_LENGTH_MISMATCH: i32 = -1073741820i32; // 0xC0000004
 const SYSTEM_PROCESS_INFORMATION: u32 = 5;
 
 // --- СИСТЕМНЫЕ ВЫЗОВЫ ---
@@ -216,19 +217,21 @@ unsafe fn stealth_scan() {
         &mut buffer_size
     );
     
+    // Проверяем на STATUS_INFO_LENGTH_MISMATCH или другие допустимые статусы
     if status != STATUS_INFO_LENGTH_MISMATCH && status != STATUS_SUCCESS {
-        println!("[-] Failed to query system information: 0x{:X}", status);
+        println!("[-] Failed to query system information: 0x{:X}", status as u32);
         return;
     }
     
-    // Выделяем буфер
-    let mut buffer = vec![0u8; (buffer_size + 32768) as usize];
+    // Выделяем буфер с запасом
+    let allocated_size = buffer_size.saturating_add(32768);
+    let mut buffer = vec![0u8; allocated_size as usize];
     
     // Второй вызов для получения данных
     let status = syscall_nt_query_system_information(
         SYSTEM_PROCESS_INFORMATION,
         buffer.as_mut_ptr() as *mut _,
-        buffer_size + 32768,
+        allocated_size,
         &mut return_length
     );
     
@@ -271,7 +274,7 @@ unsafe fn stealth_scan() {
                 as *const SystemProcessInformation;
         }
     } else {
-        println!("[-] Failed to get process list: 0x{:X}", status);
+        println!("[-] Failed to get process list: 0x{:X}", status as u32);
     }
 }
 
