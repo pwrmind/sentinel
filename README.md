@@ -1,4 +1,4 @@
-# Shadow Sentinel
+# 💂 Sentinel
 
 A stealthy system introspection and process manipulation tool for Windows, written in Rust. This tool is designed for security research and penetration testing purposes, using direct system calls to avoid detection by security software.
 
