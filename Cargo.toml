@@ -10,3 +10,4 @@ codegen-units = 1
 panic = 'abort'
 
 [dependencies]
+# НЕТ ЗАВИСИМОСТЕЙ - чистая сборка

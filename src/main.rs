@@ -4,7 +4,7 @@ use std::mem::size_of;
 use std::arch::asm;
 use std::slice;
 
-// --- МАКРОСЫ ДЛЯ ХАШИРОВАНИЯ СТРОК (обфускация) ---
+// --- ХЕШИРОВАНИЕ СТРОК ДЛЯ ОБФУСКАЦИИ ---
 const fn hash_str(s: &str) -> u32 {
     let bytes = s.as_bytes();
     let mut hash: u32 = 0x811C9DC5;
@@ -17,7 +17,7 @@ const fn hash_str(s: &str) -> u32 {
     hash
 }
 
-// --- СТРУКТУРЫ ДЛЯ NTAPI ---
+// --- СТРУКТУРЫ NTAPI ---
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct UnicodeString {
@@ -44,7 +44,7 @@ pub struct ClientId {
     pub unique_thread: *mut std::ffi::c_void,
 }
 
-// Структуры для NtQuerySystemInformation
+// --- СТРУКТУРА ДЛЯ СИСТЕМНОЙ ИНФОРМАЦИИ ---
 #[repr(C)]
 struct SystemProcessInformation {
     next_entry_offset: u32,
@@ -60,24 +60,39 @@ struct SystemProcessInformation {
     base_priority: i32,
     unique_process_id: *mut std::ffi::c_void,
     inherited_from_unique_process_id: *mut std::ffi::c_void,
-    // ... остальные поля не нужны для нашего сканирования
+    handle_count: u32,
+    session_id: u32,
+    unique_process_key: *mut std::ffi::c_void,
+    peak_virtual_size: usize,
+    virtual_size: usize,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+    private_page_count: usize,
 }
 
 // --- КОНСТАНТЫ ---
-const PROC_TERM: u32 = 0x0001; // PROCESS_TERMINATE
+const PROC_TERM: u32 = 0x0001;
 const PROC_VM_READ: u32 = 0x0010;
 const PROC_QUERY_INFO: u32 = 0x0400;
 const STATUS_SUCCESS: i32 = 0;
+const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC0000004 as i32;
 const SYSTEM_PROCESS_INFORMATION: u32 = 5;
 
-// --- ПРЯМЫЕ СИСТЕМНЫЕ ВЫЗОВЫ (Syscall) ---
+// --- СИСТЕМНЫЕ ВЫЗОВЫ ---
 unsafe fn syscall_nt_open_process(
     process_handle: *mut *mut std::ffi::c_void,
     access_mask: u32,
     object_attributes: *mut ObjectAttributes,
     client_id: *mut ClientId,
 ) -> i32 {
-    let syscall_number: u32 = 0x26; // Windows 10/11 x64 для NtOpenProcess
+    let syscall_number: u32 = 0x26;
     
     let result: i32;
     asm!(
@@ -99,7 +114,7 @@ unsafe fn syscall_nt_terminate_process(
     process_handle: *mut std::ffi::c_void,
     exit_status: i32,
 ) -> i32 {
-    let syscall_number: u32 = 0x2C; // Windows 10/11 x64 для NtTerminateProcess
+    let syscall_number: u32 = 0x2C;
     
     let result: i32;
     asm!(
@@ -122,7 +137,7 @@ unsafe fn syscall_nt_read_virtual_memory(
     buffer_size: usize,
     _return_length: *mut usize,
 ) -> i32 {
-    let syscall_number: u32 = 0x3F; // Windows 10/11 x64 для NtReadVirtualMemory
+    let syscall_number: u32 = 0x3F;
     
     let result: i32;
     asm!(
@@ -146,7 +161,7 @@ unsafe fn syscall_nt_query_system_information(
     system_information_length: u32,
     return_length: *mut u32,
 ) -> i32 {
-    let syscall_number: u32 = 0x36; // Windows 10/11 x64 для NtQuerySystemInformation
+    let syscall_number: u32 = 0x36;
     
     let result: i32;
     asm!(
@@ -164,7 +179,7 @@ unsafe fn syscall_nt_query_system_information(
     result
 }
 
-// --- ФУНКЦИИ С ОБФУСКАЦИЕЙ ---
+// --- ОСНОВНЫЕ ФУНКЦИИ ---
 unsafe fn stealth_kill(pid: u32) -> bool {
     let mut handle: *mut std::ffi::c_void = null_mut();
     let mut obj_attr: ObjectAttributes = std::mem::zeroed();
@@ -175,7 +190,6 @@ unsafe fn stealth_kill(pid: u32) -> bool {
         unique_thread: null_mut(),
     };
     
-    // Вызов через прямой syscall
     let status = syscall_nt_open_process(
         &mut handle as *mut *mut _,
         PROC_TERM,
@@ -194,7 +208,7 @@ unsafe fn stealth_scan() {
     let mut buffer_size: u32 = 0;
     let mut return_length: u32 = 0;
     
-    // Первый вызов - получаем необходимый размер буфера
+    // Первый вызов для получения размера
     let status = syscall_nt_query_system_information(
         SYSTEM_PROCESS_INFORMATION,
         null_mut(),
@@ -202,58 +216,53 @@ unsafe fn stealth_scan() {
         &mut buffer_size
     );
     
-    if status != 0xC0000004 && status != 0 { // STATUS_INFO_LENGTH_MISMATCH или другой код
+    if status != STATUS_INFO_LENGTH_MISMATCH && status != STATUS_SUCCESS {
         println!("[-] Failed to query system information: 0x{:X}", status);
         return;
     }
     
-    // Выделяем буфер с запасом
-    let mut buffer = vec![0u8; (buffer_size + 16384) as usize];
+    // Выделяем буфер
+    let mut buffer = vec![0u8; (buffer_size + 32768) as usize];
     
-    // Второй вызов - получаем данные
+    // Второй вызов для получения данных
     let status = syscall_nt_query_system_information(
         SYSTEM_PROCESS_INFORMATION,
         buffer.as_mut_ptr() as *mut _,
-        buffer_size + 16384,
+        buffer_size + 32768,
         &mut return_length
     );
     
     if status == STATUS_SUCCESS {
         println!("[+] Active processes:");
-        println!("{:<8} | {:<30} | {:<6}", "PID", "Name", "Threads");
-        println!("{}", "-".repeat(50));
+        println!("{:<8} | {:<30}", "PID", "Name");
+        println!("{}", "-".repeat(45));
         
         let mut current = buffer.as_ptr() as *const SystemProcessInformation;
+        let mut first = true;
         
-        loop {
+        while !current.is_null() {
             let process = &*current;
-            let pid = process.unique_process_id as u32;
+            let pid = process.unique_process_id as usize;
             
-            if pid != 0 {
-                let mut process_name = String::new();
+            if pid != 0 || first {
+                first = false;
                 
-                // Извлекаем имя процесса из UNICODE_STRING
-                if !process.image_name.buffer.is_null() && process.image_name.length > 0 {
+                let process_name = if !process.image_name.buffer.is_null() && process.image_name.length > 0 {
                     let name_length = (process.image_name.length / 2) as usize;
                     let name_slice = slice::from_raw_parts(process.image_name.buffer, name_length);
-                    process_name = String::from_utf16_lossy(name_slice);
+                    let mut name = String::from_utf16_lossy(name_slice);
                     
-                    // Берем только имя файла без пути
-                    if let Some(last_backslash) = process_name.rfind('\\') {
-                        process_name = process_name[last_backslash + 1..].to_string();
+                    if let Some(last_backslash) = name.rfind('\\') {
+                        name = name[last_backslash + 1..].to_string();
                     }
+                    name
                 } else {
-                    process_name = "System".to_string();
-                }
+                    if pid == 0 { "System Idle".to_string() } else { "System".to_string() }
+                };
                 
-                println!("{:<8} | {:<30} | {:<6}", 
-                    pid, 
-                    process_name,
-                    process.number_of_threads
-                );
+                println!("{:<8} | {:<30}", pid, process_name);
             }
             
-            // Переходим к следующему процессу
             if process.next_entry_offset == 0 {
                 break;
             }
@@ -302,26 +311,16 @@ unsafe fn stealth_peek(pid: u32, addr: usize) -> u64 {
     0
 }
 
-// --- FORTH VM С ШИФРОВАНИЕМ КОМАНД ---
+// --- FORTH VM ---
 struct ShadowVM {
     stack: Vec<i64>,
-    key: u8,
 }
 
 impl ShadowVM {
     fn new() -> Self { 
         Self { 
             stack: Vec::new(),
-            key: 0xAA,
         } 
-    }
-    
-    fn obfuscate(&self, s: &str) -> Vec<u8> {
-        s.bytes().map(|b| b ^ self.key).collect()
-    }
-    
-    fn deobfuscate(&self, data: &[u8]) -> String {
-        data.iter().map(|&b| (b ^ self.key) as char).collect()
     }
 
     fn run(&mut self, input: &str) {
@@ -359,7 +358,13 @@ impl ShadowVM {
                     println!("Stack ({}): {:?}", self.stack.len(), self.stack);
                 },
                 _ if hashed == hash_str("HELP") => {
-                    println!("Commands: SCAN, <pid> KILL, <addr> <pid> PEEK, .S, HELP, EXIT");
+                    println!("Commands:");
+                    println!("  SCAN             - List all processes");
+                    println!("  <pid> KILL       - Terminate process by PID");
+                    println!("  <addr> <pid> PEEK - Read memory from process");
+                    println!("  .S               - Show stack");
+                    println!("  HELP             - Show this help");
+                    println!("  EXIT             - Exit");
                 },
                 _ if hashed == hash_str("EXIT") => {
                     println!("[+] Exiting...");
@@ -372,6 +377,8 @@ impl ShadowVM {
                         if let Ok(num) = i64::from_str_radix(&word[2..], 16) { 
                             self.stack.push(num); 
                         }
+                    } else {
+                        println!("[!] Unknown command: {}", word);
                     }
                 },
             }
@@ -381,7 +388,7 @@ impl ShadowVM {
 
 // --- ТОЧКА ВХОДА ---
 fn main() {
-    // Anti-debug trick: проверка на отладку
+    // Простая анти-отладка
     #[cfg(target_arch = "x86_64")]
     unsafe {
         let is_debugged: u32;
@@ -395,15 +402,12 @@ fn main() {
         
         if is_debugged != 0 {
             println!("[!] Debugger detected!");
-            // Противоотладочная техника: уходим в бесконечный цикл
-            loop {
-                asm!("pause");
-            }
+            return;
         }
     }
     
-    println!("[+] Shadow Sentinel v2.0 activated");
-    println!("[+] System: clean");
+    println!("[+] Shadow Sentinel v3.0");
+    println!("[+] Type HELP for commands");
     
     let mut vm = ShadowVM::new();
     
