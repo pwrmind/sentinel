@@ -1,7 +1,10 @@
 use std::ptr::null_mut;
+use std::ffi::c_void;
 use std::io::{self, Write};
 use ntapi::ntzwapi::{ZwQuerySystemInformation, ZwOpenProcess, ZwTerminateProcess, ZwReadVirtualMemory};
 use ntapi::ntexapi::{SystemProcessInformation, SYSTEM_PROCESS_INFORMATION};
+use ntapi::ntobapi::OBJECT_ATTRIBUTES;
+use ntapi::ntapi_base::CLIENT_ID;
 use windows::Win32::Foundation::{STATUS_SUCCESS, HANDLE};
 use windows::Win32::System::Threading::{PROCESS_TERMINATE, PROCESS_VM_READ, PROCESS_QUERY_INFORMATION};
 use windows::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, TCP_TABLE_OWNER_PID_ALL};
@@ -42,15 +45,16 @@ impl ForthVM {
     }
 }
 
-// --- СИСТЕМНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) ---
+// --- СИСТЕМНЫЕ ФУНКЦИИ (ИСПРАВЛЕННЫЕ) ---
 
 unsafe fn kill_process(pid: usize) -> bool {
-    let mut handle = HANDLE(0);
-    let mut obj_attr: ntapi::ntpsapi::OBJECT_ATTRIBUTES = std::mem::zeroed();
-    obj_attr.Length = std::mem::size_of::<ntapi::ntpsapi::OBJECT_ATTRIBUTES>() as u32;
-    let mut client_id = ntapi::ntpsapi::CLIENT_ID { UniqueProcess: pid as *mut _, UniqueThread: null_mut() };
-    if ZwOpenProcess(&mut handle, PROCESS_TERMINATE.0, &mut obj_attr, &mut client_id) == STATUS_SUCCESS.0 {
-        return ZwTerminateProcess(handle, 1) == STATUS_SUCCESS.0;
+    let mut handle = HANDLE(std::ptr::null_mut());
+    let mut obj_attr: OBJECT_ATTRIBUTES = std::mem::zeroed();
+    obj_attr.Length = std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32;
+    let mut client_id = CLIENT_ID { UniqueProcess: pid as *mut c_void, UniqueThread: null_mut() };
+    
+    if ZwOpenProcess(&mut handle.0 as *mut *mut c_void, PROCESS_TERMINATE.0, &mut obj_attr, &mut client_id) == STATUS_SUCCESS.0 {
+        return ZwTerminateProcess(handle.0, 1) == STATUS_SUCCESS.0;
     }
     false
 }
@@ -59,7 +63,7 @@ unsafe fn deep_scan() {
     let mut buffer_size = 0;
     let _ = ZwQuerySystemInformation(SystemProcessInformation, null_mut(), 0, &mut buffer_size);
     let mut buffer = vec![0u8; buffer_size as usize + 8192];
-    if ZwQuerySystemInformation(SystemProcessInformation, buffer.as_mut_ptr() as *mut _, buffer.len() as u32, &mut buffer_size) == STATUS_SUCCESS.0 {
+    if ZwQuerySystemInformation(SystemProcessInformation, buffer.as_mut_ptr() as *mut c_void, buffer.len() as u32, &mut buffer_size) == STATUS_SUCCESS.0 {
         let mut current_ptr = buffer.as_ptr() as *const SYSTEM_PROCESS_INFORMATION;
         loop {
             let proc_info = &*current_ptr;
@@ -75,11 +79,13 @@ unsafe fn deep_scan() {
 }
 
 unsafe fn scan_network() {
+    use windows::Win32::NetworkManagement::IpHelper::MIB_TCPTABLE_OWNER_PID;
+    
     let mut table_size = 0;
-    let _ = GetExtendedTcpTable(null_mut(), &mut table_size, false, AF_INET.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0);
+    let _ = GetExtendedTcpTable(Some(std::ptr::null_mut()), &mut table_size, false, AF_INET.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0);
     let mut buffer = vec![0u8; table_size as usize];
-    if GetExtendedTcpTable(buffer.as_mut_ptr() as *mut _, &mut table_size, false, AF_INET.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0) == 0 {
-        let table = &*(buffer.as_ptr() as *const windows::Win32::NetworkManagement::IpHelper::MIB_TCPTABLE_OWNER_PID);
+    if GetExtendedTcpTable(Some(buffer.as_mut_ptr() as *mut c_void), &mut table_size, false, AF_INET.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0) == 0 {
+        let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
         println!("{:<15} | {:<15} | {:<10}", "Local", "Remote", "PID");
         for i in 0..table.dwNumEntries {
             let row = *table.table.as_ptr().add(i as usize);
@@ -92,14 +98,15 @@ unsafe fn scan_network() {
 }
 
 unsafe fn peek_memory(pid: usize, addr: usize) -> u64 {
-    let mut handle = HANDLE(0);
-    let mut obj_attr: ntapi::ntpsapi::OBJECT_ATTRIBUTES = std::mem::zeroed();
-    obj_attr.Length = std::mem::size_of::<ntapi::ntpsapi::OBJECT_ATTRIBUTES>() as u32;
-    let mut client_id = ntapi::ntpsapi::CLIENT_ID { UniqueProcess: pid as *mut _, UniqueThread: null_mut() };
-    if ZwOpenProcess(&mut handle, (PROCESS_VM_READ | PROCESS_QUERY_INFORMATION).0, &mut obj_attr, &mut client_id) == STATUS_SUCCESS.0 {
+    let mut handle = HANDLE(std::ptr::null_mut());
+    let mut obj_attr: OBJECT_ATTRIBUTES = std::mem::zeroed();
+    obj_attr.Length = std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32;
+    let mut client_id = CLIENT_ID { UniqueProcess: pid as *mut c_void, UniqueThread: null_mut() };
+    
+    if ZwOpenProcess(&mut handle.0 as *mut *mut c_void, (PROCESS_VM_READ | PROCESS_QUERY_INFORMATION).0, &mut obj_attr, &mut client_id) == STATUS_SUCCESS.0 {
         let mut value = 0u64;
         let mut read = 0;
-        ZwReadVirtualMemory(handle, addr as *mut _, &mut value as *mut _ as *mut _, 8, &mut read);
+        ZwReadVirtualMemory(handle.0, addr as *mut c_void, &mut value as *mut _ as *mut c_void, 8, &mut read);
         return value;
     }
     0
